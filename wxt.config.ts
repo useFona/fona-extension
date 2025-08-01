@@ -14,10 +14,8 @@ export default defineConfig({
     permissions: [
       'storage',
       'activeTab',
-      'scripting',
       'clipboardWrite',
     ],
-    // Add host permissions for your API
     host_permissions: [
       'https://fona.meet-jain.in/*'
     ],
