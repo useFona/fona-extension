@@ -6,6 +6,46 @@ export default defineContentScript({
     // Store current active page name and ID
     let activePageName: string = '';
     let activePageId: string = '';
+    let isCurrentSiteDisabled: boolean = false;
+
+    const checkSiteStatus = async () => {
+      try {
+        const data = await browser.storage.local.get(['disabledSites']);
+        const disabledSites = data.disabledSites || [];
+        const currentUrl = window.location.href;
+
+        isCurrentSiteDisabled = disabledSites.some((site: any) => {
+          // First check for exact URL match
+          if (site.url === currentUrl) {
+            return true;
+          }
+
+          // Then check for domain-level blocking
+          try {
+            const siteUrl = new URL(site.url);
+            const pageUrl = new URL(currentUrl);
+
+            // If the disabled site is a domain (no path), check hostname match
+            if (siteUrl.pathname === '/' && siteUrl.hostname === pageUrl.hostname) {
+              return true;
+            }
+
+            // If the disabled site is a full URL, check for exact match
+            return site.url === currentUrl;
+          } catch {
+            // If URL parsing fails, do simple string comparison
+            return site.url === currentUrl;
+          }
+        });
+
+        console.log('Site disabled status for', currentUrl, ':', isCurrentSiteDisabled);
+      } catch (error) {
+        console.error('Error checking site status:', error);
+      }
+    };
+
+    // Initialize site status check
+    checkSiteStatus();
 
     // Load initial active page from storage
     browser.storage.local.get(['pageNames']).then((data) => {
@@ -31,6 +71,27 @@ export default defineContentScript({
 
       if (message.type === 'syncError') {
         showNotification(`Sync failed: ${message.error}`, 'error');
+      }
+      if (message.type === 'siteDisabled') {
+        isCurrentSiteDisabled = true;
+        showNotification('Extension disabled on this site', 'error');
+        // Remove any existing menu
+        const existingMenu = document.getElementById('custom-selection-menu');
+        if (existingMenu) {
+          existingMenu.remove();
+        }
+      }
+
+      if (message.type === 'siteEnabled') {
+        isCurrentSiteDisabled = false;
+        // showNotification('Extension enabled on this site', 'success');
+      }
+    });
+
+    // Listen for storage changes
+    browser.storage.onChanged.addListener((changes) => {
+      if (changes.disabledSites) {
+        checkSiteStatus();
       }
     });
 
@@ -98,6 +159,64 @@ export default defineContentScript({
       menu.style.opacity = '0';
       menu.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
 
+      // Helper function to remove menu with animation
+      const removeMenuWithAnimation = (isManualClose: boolean = false) => {
+        if (isManualClose) {
+          wasMenuManuallyClosed = true;
+        }
+        menu.style.opacity = '0';
+        menu.style.transform = 'scale(0.8) translateY(-10px)';
+        setTimeout(() => {
+          if (menu.parentNode) {
+            menu.remove();
+            document.removeEventListener('click', removeMenu);
+          }
+        }, 200);
+      };
+
+      // Create close button
+      const closeButton = document.createElement('button');
+      closeButton.innerHTML = '×';
+      closeButton.style.position = 'absolute';
+      closeButton.style.top = '-8px';
+      closeButton.style.right = '-8px';
+      closeButton.style.width = '20px';
+      closeButton.style.height = '20px';
+      closeButton.style.borderRadius = '50%';
+      closeButton.style.border = '2px solid #333';
+      closeButton.style.backgroundColor = '#1a1a1a';
+      closeButton.style.color = '#E0E0E0';
+      closeButton.style.fontSize = '14px';
+      closeButton.style.fontWeight = 'bold';
+      closeButton.style.cursor = 'pointer';
+      closeButton.style.display = 'flex';
+      closeButton.style.alignItems = 'center';
+      closeButton.style.justifyContent = 'center';
+      closeButton.style.lineHeight = '1';
+      closeButton.style.transition = 'all 0.2s ease';
+      closeButton.style.zIndex = '1000000';
+
+      // Close button hover effects
+      closeButton.addEventListener('mouseenter', () => {
+        closeButton.style.backgroundColor = '#dc2626';
+        closeButton.style.borderColor = '#dc2626';
+        closeButton.style.transform = 'scale(1.1)';
+      });
+      closeButton.addEventListener('mouseleave', () => {
+        closeButton.style.backgroundColor = '#1a1a1a';
+        closeButton.style.borderColor = '#333';
+        closeButton.style.transform = 'scale(1)';
+      });
+
+      // Close button click handler
+      closeButton.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        removeMenuWithAnimation(true); // Pass true to indicate manual close
+      });
+
+      menu.appendChild(closeButton);
+
       // Add active page name display
       if (activePageName) {
         const pageNameDiv = document.createElement('div');
@@ -118,18 +237,6 @@ export default defineContentScript({
       buttonsContainer.style.display = 'flex';
       buttonsContainer.style.gap = '4px';
       buttonsContainer.style.justifyContent = 'space-between';
-
-      // Helper function to remove menu with animation
-      const removeMenuWithAnimation = () => {
-        menu.style.opacity = '0';
-        menu.style.transform = 'scale(0.8) translateY(-10px)';
-        setTimeout(() => {
-          if (menu.parentNode) {
-            menu.remove();
-            document.removeEventListener('click', removeMenu);
-          }
-        }, 200);
-      };
 
       // Create menu options
       const options = [
@@ -248,10 +355,10 @@ export default defineContentScript({
         menu.style.transform = 'scale(1) translateY(0)';
       });
 
-      // Remove menu when clicking outside
+      // Remove menu when clicking outside (but not on the close button)
       const removeMenu = (e: MouseEvent) => {
         if (!menu.contains(e.target as Node)) {
-          removeMenuWithAnimation();
+          removeMenuWithAnimation(false); // Not a manual close
           document.removeEventListener('click', removeMenu);
         }
       };
@@ -260,12 +367,12 @@ export default defineContentScript({
         document.addEventListener('click', removeMenu);
       }, 100);
 
-      // Auto-remove after 30 seconds
+      // Auto-remove after 10 seconds
       setTimeout(() => {
         if (menu.parentNode) {
-          removeMenuWithAnimation();
+          removeMenuWithAnimation(false);
         }
-      }, 30000);
+      }, 10000);
     };
 
     // Add note to queue via background script
@@ -373,7 +480,7 @@ export default defineContentScript({
       notification.style.fontWeight = 'bold';
       notification.style.zIndex = '10001';
       notification.style.fontSize = '14px';
-      notification.style.backgroundColor = type === 'success' ? '#16a34a' : '#dc2626';
+      notification.style.backgroundColor = type === 'success' ? '#1f4e1c' : '#2d2d2d';
       notification.style.boxShadow = '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)';
       notification.style.opacity = '0';
       notification.style.transform = 'translateY(-10px)';
@@ -418,21 +525,33 @@ export default defineContentScript({
 
     // Listen for text selection
     let isProcessing = false;
+    let wasMenuManuallyClosed = false;
 
     document.addEventListener(
       'mouseup',
       debounce((event: MouseEvent) => {
-        if (isProcessing) return;
+        if (isCurrentSiteDisabled) return;
 
+        if (isProcessing) return;
         isProcessing = true;
         try {
           const selection = window.getSelection();
           const selectedText = selection && selection.toString().trim();
+
+          // Check if menu was manually closed and we're still on the same selection
+          if (selectedText && wasMenuManuallyClosed) {
+            console.debug('Menu was manually closed, not reopening for same selection');
+            wasMenuManuallyClosed = false; // Reset flag for next selection
+            return;
+          }
+
           if (selectedText) {
             event.stopPropagation();
             createMenu(event.clientX, event.clientY, selectedText);
           } else {
             console.debug('No valid text selection detected');
+            // Reset flag when no selection
+            wasMenuManuallyClosed = false;
           }
         } finally {
           setTimeout(() => {
@@ -447,6 +566,8 @@ export default defineContentScript({
     document.addEventListener(
       'dblclick',
       (event) => {
+        if (isCurrentSiteDisabled) return;
+
         if (isProcessing) return;
 
         isProcessing = true;
@@ -468,6 +589,9 @@ export default defineContentScript({
 
     // Keyboard shortcuts for debugging
     document.addEventListener('keydown', (event) => {
+      if (isCurrentSiteDisabled) {
+        return;
+      }
       // Ctrl+Shift+Q - Show queue status
       if (event.ctrlKey && event.shiftKey && event.key === 'Q') {
         event.preventDefault();
@@ -484,6 +608,22 @@ export default defineContentScript({
             showNotification('Manual sync failed', 'error');
           }
         });
+      }
+
+      // ESC key to close menu
+      if (event.key === 'Escape') {
+        const existingMenu = document.getElementById('custom-selection-menu');
+        if (existingMenu) {
+          wasMenuManuallyClosed = true; // Set flag for ESC key close
+          const menu = existingMenu;
+          menu.style.opacity = '0';
+          menu.style.transform = 'scale(0.8) translateY(-10px)';
+          setTimeout(() => {
+            if (menu.parentNode) {
+              menu.remove();
+            }
+          }, 200);
+        }
       }
     });
 

@@ -1,6 +1,10 @@
 import { defineConfig } from 'wxt';
+import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
+  vite: () => ({
+    plugins: [tailwindcss()],
+  }),
   srcDir: 'src',
   outDir: 'dist',
   webExt: {
@@ -9,7 +13,7 @@ export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
     name: 'FONA',
-    version: '1.0.0',
+    version: '1.2.0',
     description: 'Your own Flow based notes editor',
     permissions: [
       'storage',

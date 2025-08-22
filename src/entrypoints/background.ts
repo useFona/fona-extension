@@ -14,6 +14,12 @@ interface User {
   token: string;
 }
 
+interface DisabledSite {
+  id: string;
+  url: string;
+  addedAt: string;
+}
+
 const API_BASE_URL = 'https://fona.meet-jain.in/api/extention';
 
 export default defineBackground(() => {
@@ -25,7 +31,7 @@ export default defineBackground(() => {
   // Initialize background script
   const initialize = async () => {
     // Load user and active page from storage
-    const data = await browser.storage.local.get(['user', 'pageNames', 'noteQueue']);
+    const data = await browser.storage.local.get(['user', 'pageNames', 'noteQueue', 'disabledSites']);
 
     if (data.user) {
       currentUser = data.user;
@@ -43,8 +49,33 @@ export default defineBackground(() => {
       noteQueue = data.noteQueue;
     }
 
+    // Ensure disabled sites array exists
+    if (!data.disabledSites) {
+      await browser.storage.local.set({ disabledSites: [] });
+    }
+
     // Start sync interval
     startSyncInterval();
+  };
+
+  // Check if a URL is disabled
+  const isUrlDisabled = async (url: string): Promise<boolean> => {
+    try {
+      const data = await browser.storage.local.get(['disabledSites']);
+      const disabledSites: DisabledSite[] = data.disabledSites || [];
+
+      return disabledSites.some(site => {
+        try {
+          const siteUrl = new URL(site.url);
+          const checkUrl = new URL(url);
+          return siteUrl.hostname === checkUrl.hostname;
+        } catch {
+          return site.url === url;
+        }
+      });
+    } catch {
+      return false;
+    }
   };
 
   // Start the sync interval (every 10 seconds)
@@ -103,7 +134,8 @@ export default defineBackground(() => {
     console.log(`Syncing ${noteQueue.length} notes to API...`);
     const now = new Date();
     const timeString = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    console.log(timeString)
+    console.log(timeString);
+
     try {
       const response = await fetch(`${API_BASE_URL}/note`, {
         method: 'POST',
@@ -125,13 +157,14 @@ export default defineBackground(() => {
       console.log('Notes synced successfully:', result);
 
       // Clear the queue after successful sync
+      const syncedCount = noteQueue.length;
       noteQueue = [];
       await browser.storage.local.set({ noteQueue });
 
       // Broadcast success to content scripts
       broadcastToContentScripts({
         type: 'syncSuccess',
-        count: noteQueue.length
+        count: syncedCount
       });
 
     } catch (error) {
@@ -140,7 +173,7 @@ export default defineBackground(() => {
       // Broadcast error to content scripts
       broadcastToContentScripts({
         type: 'syncError',
-        error: error
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   };
@@ -150,14 +183,33 @@ export default defineBackground(() => {
     try {
       const tabs = await browser.tabs.query({});
       for (const tab of tabs) {
-        if (tab.id) {
-          browser.tabs.sendMessage(tab.id, message).catch(() => {
-            // Ignore errors for tabs that can't receive messages
-          });
+        if (tab.id && tab.url) {
+          // Check if the site is disabled before sending messages
+          const disabled = await isUrlDisabled(tab.url);
+          if (!disabled) {
+            browser.tabs.sendMessage(tab.id, message).catch(() => {
+              // Ignore errors for tabs that can't receive messages
+            });
+          }
         }
       }
     } catch (error) {
       console.error('Error broadcasting to content scripts:', error);
+    }
+  };
+
+  // Notify content script about site status
+  const notifyContentScriptSiteStatus = async (tabId: number, url: string) => {
+    try {
+      const disabled = await isUrlDisabled(url);
+
+      await browser.tabs.sendMessage(tabId, {
+        type: disabled ? 'siteDisabled' : 'siteEnabled',
+        url: url
+      });
+    } catch (error) {
+      // Content script might not be ready yet, this is normal
+      console.debug('Could not send site status to content script:', error);
     }
   };
 
@@ -172,7 +224,7 @@ export default defineBackground(() => {
         currentUser = message.user;
         activePageId = message.activePageId;
 
-        // Broadcast the update to all content scripts
+        // Broadcast the update to all content scripts (only to enabled sites)
         broadcastToContentScripts({
           type: 'pageNamesUpdated',
           pageNames: message.pageNames,
@@ -186,12 +238,29 @@ export default defineBackground(() => {
 
     // Handle note addition from content script
     if (message.type === 'addNote') {
-      addNoteToQueue(message.text, message.noteType).then(() => {
-        sendResponse({ success: true });
-      }).catch((error) => {
-        console.error('Error adding note:', error);
-        sendResponse({ success: false, error: error.message });
-      });
+      // Check if the sender tab is disabled
+      if (sender.tab?.url) {
+        isUrlDisabled(sender.tab.url).then(disabled => {
+          if (disabled) {
+            sendResponse({ success: false, error: 'Site is disabled' });
+            return;
+          }
+
+          addNoteToQueue(message.text, message.noteType).then(() => {
+            sendResponse({ success: true });
+          }).catch((error) => {
+            console.error('Error adding note:', error);
+            sendResponse({ success: false, error: error.message });
+          });
+        });
+      } else {
+        addNoteToQueue(message.text, message.noteType).then(() => {
+          sendResponse({ success: true });
+        }).catch((error) => {
+          console.error('Error adding note:', error);
+          sendResponse({ success: false, error: error.message });
+        });
+      }
       return true;
     }
 
@@ -227,6 +296,16 @@ export default defineBackground(() => {
       return true;
     }
 
+    // Handle site status check
+    if (message.type === 'checkSiteStatus') {
+      isUrlDisabled(message.url).then(disabled => {
+        sendResponse({ success: true, isDisabled: disabled });
+      }).catch(error => {
+        sendResponse({ success: false, error: error.message });
+      });
+      return true;
+    }
+
     return false;
   });
 
@@ -243,17 +322,43 @@ export default defineBackground(() => {
   });
 
   // Handle tab updates (when user navigates)
-  browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (changeInfo.status === 'complete' && tab.url) {
-      // Broadcast current state to the newly loaded tab
-      browser.tabs.sendMessage(tabId, {
-        type: 'pageNamesUpdated',
-        pageNames: [],
-        activePage: '',
-        activePageId: activePageId
-      }).catch(() => {
-        // Ignore errors for tabs that can't receive messages
-      });
+      // Check if the site is disabled and notify content script
+      await notifyContentScriptSiteStatus(tabId, tab.url);
+
+      // Only broadcast page names to enabled sites
+      const disabled = await isUrlDisabled(tab.url);
+      if (!disabled) {
+        // Broadcast current state to the newly loaded tab
+        browser.tabs.sendMessage(tabId, {
+          type: 'pageNamesUpdated',
+          pageNames: [],
+          activePage: '',
+          activePageId: activePageId
+        }).catch(() => {
+          // Ignore errors for tabs that can't receive messages
+        });
+      }
+    }
+  });
+
+  // Handle storage changes (for disabled sites updates)
+  browser.storage.onChanged.addListener(async (changes, areaName) => {
+    if (areaName === 'local' && changes.disabledSites) {
+      console.log('Disabled sites updated');
+
+      // Notify all tabs about the status change
+      try {
+        const tabs = await browser.tabs.query({});
+        for (const tab of tabs) {
+          if (tab.id && tab.url) {
+            await notifyContentScriptSiteStatus(tab.id, tab.url);
+          }
+        }
+      } catch (error) {
+        console.error('Error notifying tabs about disabled sites update:', error);
+      }
     }
   });
 
@@ -269,3 +374,22 @@ export default defineBackground(() => {
   // Initialize on script load
   initialize();
 });
+
+browser.runtime.onInstalled.addListener((details) => {
+  if (details.reason === "install") {
+    browser.tabs.create({
+      url: `https://fona.meet-jain.in/thanks?utm_source=extension&utm_medium=install&browser=${import.meta.env.BROWSER
+        }`,
+    });
+  } else if (details.reason === "update") {
+    const previousVersion = details.previousVersion;
+    const currentVersion = browser.runtime.getManifest().version;
+    if (previousVersion !== currentVersion) {
+      browser.tabs.create({
+        url: `https://fona.meet-jain.in/release-notes/?utm_source=extension&utm_medium=update&browser=${import.meta.env.BROWSER
+          }#v${currentVersion}`,
+      });
+    }
+  }
+});
+

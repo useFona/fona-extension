@@ -1,26 +1,17 @@
+import Login from '@/components/Login';
+import UserProfileHeader from '@/components/UserProfileHeader';
+import AddPageInput from '@/components/AddPageInput';
+import ActivePageDisplay from '@/components/ActivePageDisplay';
+import ErrorDisplay from '@/components/ErrorDisplay';
+import DashboardLink from '@/components/DashboardLink';
+import { ApiService } from '@/services/api';
+import { StorageService } from '@/services/storage';
+import { PageName, Page, User, DisabledSite } from '@/types';
+
 import React, { useState, useEffect } from 'react';
-import { Plus, X, Check, RefreshCw, User } from 'lucide-react';
-import './style.css';
-
-interface PageName {
-  id: string;
-  name: string;
-  isActive: boolean;
-}
-
-interface User {
-  id: string;
-  name: string;
-  email: string;
-  token: string;
-}
-
-interface Page {
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-}
+import PagesList from '@/components/PageList';
+import DisabledSitesPage from '@/components/DisabledSitesPage';
+import Footer from '@/components/Footer';
 
 const API_BASE_URL = 'https://fona.meet-jain.in/api/extention';
 
@@ -32,36 +23,57 @@ const App: React.FC = () => {
   const [pages, setPages] = useState<Page[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [showTokenInput, setShowTokenInput] = useState<boolean>(false);
+  const [showDisabledSites, setShowDisabledSites] = useState<boolean>(false);
+  const [disabledSites, setDisabledSites] = useState<DisabledSite[]>([]);
+  const [currentUrl, setCurrentUrl] = useState<string>('');
+  const [isCurrentSiteDisabled, setIsCurrentSiteDisabled] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
 
   // Load saved data from storage on mount
   useEffect(() => {
     loadInitialData();
+    getCurrentUrl();
   }, []);
+
+  // Check if current site is disabled whenever disabledSites or currentUrl changes
+  useEffect(() => {
+    if (currentUrl) {
+      checkIfCurrentSiteDisabled();
+    }
+  }, [disabledSites, currentUrl]);
+
+  const getCurrentUrl = async () => {
+    try {
+      const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+      if (tabs[0]?.url) {
+        setCurrentUrl(tabs[0].url);
+      }
+    } catch (error) {
+      console.error('Error getting current URL:', error);
+    }
+  };
+
+  const checkIfCurrentSiteDisabled = async () => {
+    if (!currentUrl) return;
+    
+    try {
+      const isDisabled = await StorageService.isUrlDisabled(currentUrl);
+      setIsCurrentSiteDisabled(isDisabled);
+    } catch (error) {
+      console.error('Error checking if site is disabled:', error);
+    }
+  };
 
   const loadInitialData = async () => {
     try {
-      const data = await browser.storage.local.get(['user', 'pageNames', 'pages', 'userToken']);
+      const data = await StorageService.loadInitialData();
 
-      // Load user from storage first
-      if (data.user) {
-        setUser(data.user);
-      }
-
-      // Load user token
-      if (data.userToken) {
-        setUserToken(data.userToken);
-      }
-
-      // Load pages from storage
-      if (data.pages && Array.isArray(data.pages)) {
-        setPages(data.pages);
-      }
-
-      // Load page names from storage
-      if (data.pageNames && Array.isArray(data.pageNames)) {
-        setPageNames(data.pageNames);
-      }
+      // Load data from storage
+      if (data.user) setUser(data.user);
+      if (data.userToken) setUserToken(data.userToken);
+      if (data.pages) setPages(data.pages);
+      if (data.pageNames) setPageNames(data.pageNames);
+      if (data.disabledSites) setDisabledSites(data.disabledSites);
 
       // If user token exists but no user data, fetch user
       if (data.userToken && !data.user) {
@@ -82,45 +94,15 @@ const App: React.FC = () => {
     setError('');
 
     try {
-      const response = await fetch(`${API_BASE_URL}/user?userToken=${token}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      const userObj = await ApiService.fetchUser(token);
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        console.error('API Error Response:', {
-          status: response.status,
-          statusText: response.statusText,
-          errorData
-        });
-        throw new Error(`Failed to fetch user: ${response.status} ${response.statusText}`);
-      }
-
-      const responseData = await response.json();
-      const userData = responseData.user; // Access the nested user object
-
-      if (!userData) {
-        throw new Error('No user data found in response');
-      }
-
-      const userObj: User = {
-        id: userData.id,
-        name: userData.name,
-        email: userData.email,
-        token: token
-      };
-
-      console.log('User data received:', userObj); // Debug log
+      console.log('User data received:', userObj);
 
       setUser(userObj);
       setUserToken(token);
 
-      // Save to storage
-      await browser.storage.local.set({ user: userObj, userToken: token });
-      console.log('User data saved to storage'); // Debug log
+      await StorageService.saveUser(userObj, token);
+      console.log('User data saved to storage');
 
       // Fetch pages after user is loaded
       await fetchPages(token);
@@ -133,47 +115,46 @@ const App: React.FC = () => {
     }
   };
 
-  const fetchPages = async (token: string) => {
+  const fetchPages = async (token: string, newPageId: string | null = null) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/pages?userToken=${token}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch pages');
-      }
-
-      const responseData = await response.json();
-
-      // Extract the pages array from the response object
-      const pagesArray = responseData.pages || [];
-
-      // Transform the API response to match our Page interface
-      const formattedPages: Page[] = pagesArray.map((page: any) => ({
-        id: page.id,
-        title: page.title,
-        createdAt: page.createdAt || new Date().toISOString(),
-        updatedAt: page.updatedAt || new Date().toISOString()
-      }));
+      const formattedPages = await ApiService.fetchPages(token);
 
       setPages(formattedPages);
-
-      // Save to storage
-      await browser.storage.local.set({ pages: formattedPages });
+      await StorageService.savePages(formattedPages);
 
       // Convert pages to pageNames format for backward compatibility
-      const convertedPageNames: PageName[] = formattedPages.map((page: Page, index: number) => ({
-        id: page.id,
-        name: page.title,
-        isActive: index === 0 // First page is active by default
-      }));
+      let convertedPageNames = StorageService.convertPagesToPageNames(formattedPages);
+
+      // If we have a new page ID, make sure it's set as active
+      // Otherwise, if no pages are active, set the first page as active
+      if (newPageId) {
+        convertedPageNames = convertedPageNames.map(page => ({
+          ...page,
+          isActive: page.id === newPageId
+        }));
+      } else if (convertedPageNames.length > 0 && !convertedPageNames.some(page => page.isActive)) {
+        convertedPageNames[0].isActive = true;
+        // Set newPageId to the first page's ID to trigger the notification
+        newPageId = convertedPageNames[0].id;
+      }
 
       setPageNames(convertedPageNames);
-      await browser.storage.local.set({ pageNames: convertedPageNames });
+      await StorageService.savePageNames(convertedPageNames);
 
+      // Notify background script about the active page change
+      const activePage = convertedPageNames.find(page => page.isActive);
+      if (activePage && user) {
+        // Update the active page in the background script
+        browser.runtime.sendMessage({
+          type: 'updatePageNames',
+          pageNames: convertedPageNames,
+          activePage: activePage.name,
+          activePageId: activePage.id,
+          user: user
+        }).catch(error => {
+          console.error('Error notifying background script:', error);
+        });
+      }
     } catch (error) {
       console.error('Error fetching pages:', error);
       setError('Failed to fetch pages.');
@@ -195,6 +176,7 @@ const App: React.FC = () => {
 
     setIsLoading(true);
     try {
+      // First, create the new page and get its ID
       const response = await fetch(`${API_BASE_URL}/pages`, {
         method: 'POST',
         headers: {
@@ -210,9 +192,15 @@ const App: React.FC = () => {
         throw new Error('Failed to create page');
       }
 
-      // Instead of just adding the new page to the local state,
-      // fetch the complete pages list from the server to ensure consistency
-      await fetchPages(user.token);
+      const responseData = await response.json();
+      const newPageId = responseData.page?.id;
+
+      if (!newPageId) {
+        throw new Error('No page ID returned from server');
+      }
+
+      // Fetch the complete pages list and set the new page as active
+      await fetchPages(user.token, newPageId);
 
     } catch (error) {
       console.error('Error creating page:', error);
@@ -222,27 +210,23 @@ const App: React.FC = () => {
     }
   };
 
-  // Add new page name
   const addPageName = () => {
     if (newPageName.trim() === '') return;
-
     createPage(newPageName.trim());
     setNewPageName('');
   };
 
-  // Set active page name
-  const setActivePage = (id: string) => {
+  const setActivePage = async (id: string) => {
     const updatedNames = pageNames.map(page => ({
       ...page,
       isActive: page.id === id
     }));
 
     setPageNames(updatedNames);
-    savePageNames(updatedNames);
+    await savePageNames(updatedNames);
   };
 
-  // Delete page name
-  const deletePage = (id: string) => {
+  const deletePage = async (id: string) => {
     const updatedNames = pageNames.filter(page => page.id !== id);
     const updatedPages = pages.filter(page => page.id !== id);
 
@@ -256,30 +240,15 @@ const App: React.FC = () => {
 
     setPageNames(updatedNames);
     setPages(updatedPages);
-    savePageNames(updatedNames);
-
-    // Save updated pages to storage
-    browser.storage.local.set({ pages: updatedPages });
+    await savePageNames(updatedNames);
+    await StorageService.savePages(updatedPages);
   };
 
-  // Save page names to storage
   const savePageNames = async (names: PageName[]) => {
-    await browser.storage.local.set({ pageNames: names });
-
-    // Get active page name
-    const activePage = names.find(page => page.isActive);
-
-    // Notify background script
-    browser.runtime.sendMessage({
-      type: 'updatePageNames',
-      pageNames: names,
-      activePage: activePage?.name || '',
-      activePageId: activePage?.id || '',
-      user: user
-    });
+    await StorageService.savePageNames(names);
+    await StorageService.notifyBackgroundScript(names, user);
   };
 
-  // Refresh data
   const refreshData = async () => {
     if (!user) return;
 
@@ -288,6 +257,9 @@ const App: React.FC = () => {
 
     try {
       await fetchUser(user.token);
+      // Also refresh disabled sites
+      const sites = await StorageService.loadDisabledSites();
+      setDisabledSites(sites);
     } catch (error) {
       console.error('Error refreshing data:', error);
       setError('Failed to refresh data.');
@@ -296,7 +268,6 @@ const App: React.FC = () => {
     }
   };
 
-  // Logout user and close extension
   const logout = () => {
     // Close the extension popup immediately
     window.close();
@@ -308,361 +279,141 @@ const App: React.FC = () => {
       setUserToken('');
       setPages([]);
       setPageNames([]);
+      setDisabledSites([]);
+      setShowDisabledSites(false);
 
       // Clear storage
-      await browser.storage.local.clear();
+      await StorageService.clearAll();
       console.log('User logged out successfully');
     })();
   };
 
-  // Handle Enter key press
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      if (showTokenInput) {
-        handleTokenSubmit();
-      } else {
-        addPageName();
+  const handleAddCurrentSite = async () => {
+    if (!currentUrl || isCurrentSiteDisabled) return;
+
+    try {
+      setIsLoading(true);
+      const newSite = await StorageService.addDisabledSite(currentUrl);
+      const updatedSites = await StorageService.loadDisabledSites();
+      setDisabledSites(updatedSites);
+      setIsCurrentSiteDisabled(true);
+      
+      // Notify content script about the change
+      try {
+        const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+        if (tabs[0]?.id) {
+          await browser.tabs.sendMessage(tabs[0].id, {
+            type: 'siteDisabled',
+            url: currentUrl
+          });
+        }
+      } catch (error) {
+        console.error('Error notifying content script:', error);
       }
+    } catch (error) {
+      console.error('Error adding current site to disabled list:', error);
+      setError('Failed to disable current site.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleRemoveSite = async (id: string) => {
+    try {
+      setIsLoading(true);
+      await StorageService.removeDisabledSite(id);
+      const updatedSites = await StorageService.loadDisabledSites();
+      setDisabledSites(updatedSites);
+      
+      // Check if the removed site was the current site
+      if (currentUrl) {
+        const isStillDisabled = await StorageService.isUrlDisabled(currentUrl);
+        setIsCurrentSiteDisabled(isStillDisabled);
+      }
+      
+      // Notify content script about the change
+      try {
+        const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+        if (tabs[0]?.id) {
+          await browser.tabs.sendMessage(tabs[0].id, {
+            type: 'siteEnabled',
+            siteId: id
+          });
+        }
+      } catch (error) {
+        console.error('Error notifying content script:', error);
+      }
+    } catch (error) {
+      console.error('Error removing site from disabled list:', error);
+      setError('Failed to enable site.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const activePage = pageNames.find(page => page.isActive);
 
-  // Show token input if no user
-  if (!user || showTokenInput) {
+  // Show login component if no user
+  if (!user) {
     return (
-      <div style={{ padding: '30px 15px', width: '300px', backgroundColor: '#161616', border: '1px solid #292929' }}>
-        <div style={{ textAlign: 'center', margin: '20px 0' }}>
-          <User size={48} style={{ color: '#7b7b7d', marginBottom: '10px' }} />
-          <h2 style={{ margin: '0 0 10px 0', fontSize: '18px', color: '#7b7b7d' }}>Login</h2>
-          <p style={{ color: '#7b7b7d', fontSize: '14px', margin: '0 0 20px 0' }}>
-            Please enter your user token copied from Fona's dashboard
-          </p>
-        </div>
+      <Login
+        userToken={userToken}
+        setUserToken={setUserToken}
+        onSubmit={handleTokenSubmit}
+        isLoading={isLoading}
+        error={error}
+      />
+    );
+  }
 
-        <div style={{ marginBottom: '15px' }}>
-          <input
-            type="text"
-            value={userToken}
-            onChange={(e) => setUserToken(e.target.value)}
-            onKeyPress={handleKeyPress}
-            placeholder="Enter your user token"
-            style={{
-              width: '100%',
-              padding: '10px',
-              border: '1px solid #292929',
-              borderRadius: '8px',
-              fontSize: '14px',
-              boxSizing: 'border-box',
-              backgroundColor: '#191919',
-              color: '#7b7b7d',
-              outline: 'none'
-            }}
-          />
-        </div>
-
-        <button
-          onClick={handleTokenSubmit}
-          disabled={isLoading}
-          style={{
-            width: '100%',
-            padding: '10px',
-            backgroundColor: '#242424',
-            color: '#7b7b7d',
-            border: '1px solid #292929',
-            borderRadius: '8px',
-            cursor: isLoading ? 'not-allowed' : 'pointer',
-            fontSize: '14px',
-            opacity: isLoading ? 0.6 : 1,
-            transition: 'all 0.2s ease'
-          }}
-        >
-          {isLoading ? 'Logging in...' : 'Login'}
-        </button>
-
-        {error && (
-          <div style={{
-            marginTop: '10px',
-            padding: '8px',
-            backgroundColor: '#2d1b1b',
-            border: '1px solid #4a2626',
-            borderRadius: '8px',
-            color: '#ff6b6b',
-            fontSize: '12px'
-          }}>
-            {error}
-          </div>
-        )}
-      </div>
+  if (showDisabledSites) {
+    return (
+      <DisabledSitesPage
+        onClose={() => setShowDisabledSites(false)}
+        disabledSites={disabledSites}
+        onRemoveSite={handleRemoveSite}
+        onAddCurrentSite={handleAddCurrentSite}
+        currentUrl={currentUrl}
+        isCurrentSiteDisabled={isCurrentSiteDisabled}
+        user={user}
+        onRefresh={refreshData}
+        onLogout={logout}
+        isLoading={isLoading}
+      />
     );
   }
 
   return (
-    <div style={{ padding: '15px', width: '300px', minHeight: '350px', backgroundColor: '#161616', border: '1px solid #292929' }}>
-      {/* User Profile Header */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        marginBottom: '15px',
-        padding: '10px',
-        backgroundColor: '#191919',
-        borderRadius: '8px',
-        border: '1px solid #242424'
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <img
-            src={browser.runtime.getURL('/wxt.svg')}
-            alt="Fona Logo"
-            style={{
-              width: '24px',
-              height: '24px',
-              borderRadius: '4px'
-            }}
-          />
-          <div>
-            <div style={{ fontSize: '14px', fontWeight: 'bold', color: '#7b7b7d' }}>
-              {user.name}'s fona
-            </div>
-            <div style={{ fontSize: '9px', color: '#7b7b7d' }}>{user.email}</div>
-          </div>
-        </div>
+    <div className="w-[420px] h-max-[675px]  p-4 bg-[#161616] border border-[#292929]">
+      <UserProfileHeader
+        user={user}
+        onRefresh={refreshData}
+        onLogout={logout}
+        isLoading={isLoading}
+      />
 
-        <div style={{ display: 'flex', gap: '5px' }}>
-          <button
-            onClick={refreshData}
-            disabled={isLoading}
-            style={{
-              padding: '6px',
-              backgroundColor: '#242424',
-              color: '#7b7b7d',
-              border: '1px solid #292929',
-              borderRadius: '6px',
-              cursor: isLoading ? 'not-allowed' : 'pointer',
-              opacity: isLoading ? 0.6 : 1,
-              transition: 'all 0.2s ease'
-            }}
-          >
-            <RefreshCw size={14} />
-          </button>
+      <h2 className="m-0 mb-4 text-2xl font-extrabold text-[#7b7b7d]">Pages</h2>
 
-          <button
-            onClick={logout}
-            style={{
-              padding: '6px',
-              backgroundColor: '#2d1b1b',
-              color: '#ff6b6b',
-              border: '1px solid #4a2626',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              transition: 'all 0.2s ease',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              fontSize: '12px'
-            }}
-          >
-            <span>Logout</span>
-          </button>
-        </div>
-      </div>
+      <AddPageInput
+        newPageName={newPageName}
+        setNewPageName={setNewPageName}
+        onAdd={addPageName}
+        isLoading={isLoading}
+      />
 
-      <h2 style={{ margin: '0 0 15px 0', fontSize: '18px', color: '#7b7b7d' }}>Pages</h2>
+      <ActivePageDisplay activePage={activePage} />
 
-      {/* Add new page */}
-      <div style={{ marginBottom: '15px' }}>
-        <div style={{ display: 'flex', gap: '5px' }}>
-          <input
-            type="text"
-            value={newPageName}
-            onChange={(e) => setNewPageName(e.target.value)}
-            onKeyPress={handleKeyPress}
-            placeholder="Enter page name"
-            disabled={isLoading}
-            style={{
-              flex: 1,
-              padding: '8px',
-              border: '1px solid #292929',
-              borderRadius: '6px',
-              fontSize: '14px',
-              backgroundColor: '#191919',
-              color: '#7b7b7d',
-              outline: 'none'
-            }}
-          />
-          <button
-            onClick={addPageName}
-            disabled={isLoading}
-            style={{
-              padding: '8px 12px',
-              backgroundColor: '#242424',
-              color: '#7b7b7d',
-              border: '1px solid #292929',
-              borderRadius: '6px',
-              cursor: isLoading ? 'not-allowed' : 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              opacity: isLoading ? 0.6 : 1,
-              transition: 'all 0.2s ease'
-            }}
-          >
-            <Plus size={16} />
-          </button>
-        </div>
-      </div>
+      <PagesList
+        pageNames={pageNames}
+        onSetActive={setActivePage}
+        onDelete={deletePage}
+        isLoading={isLoading}
+      />
 
-      {/* Current active page */}
-      {activePage && (
-        <div style={{
-          marginBottom: '15px',
-          padding: '10px',
-          backgroundColor: '#242424',
-          borderRadius: '8px',
-          border: '1px solid #292929',
-          color: '#7b7b7d'
-        }}>
-          <strong>Active: {activePage.name}</strong>
-        </div>
-      )}
+      <ErrorDisplay error={error} />
 
-      {/* Pages list */}
-      <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
-        {pageNames.length === 0 ? (
-          <p style={{ color: '#7b7b7d', textAlign: 'center', margin: '20px 0' }}>
-            {isLoading ? 'Loading pages...' : 'No pages found'}
-          </p>
-        ) : (
-          // Sort pages to show active page first
-          [...pageNames]
-            .sort((a, b) => (a.isActive === b.isActive ? 0 : a.isActive ? -1 : 1))
-            .map((page) => (
-              <div
-                key={page.id}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '10px',
-                  padding: '8px',
-                  marginBottom: '5px',
-                  backgroundColor: page.isActive ? '#242424' : '#191919',
-                  borderRadius: '6px',
-                  color: '#7b7b7d',
-                  border: page.isActive ? '1px solid #292929' : '1px solid #242424',
-                  transition: 'all 0.2s ease'
-                }}
-              >
-                <button
-                  onClick={() => setActivePage(page.id)}
-                  style={{
-                    padding: '4px',
-                    backgroundColor: page.isActive ? '#292929' : '#242424',
-                    color: '#1f4e1c',
-                    border: '1px solid #1f4e1c',
-                    borderRadius: '50%',
-                    cursor: 'pointer',
-                    width: '24px',
-                    height: '24px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    transition: 'all 0.2s ease'
-                  }}
-                >
-                  <Check size={14} />
-                </button>
-
-                <span style={{ flex: 1, fontSize: '14px', color: '#7b7b7d' }}>
-                  {page.name}
-                </span>
-
-                {page.isActive && (
-                  <div style={{ position: 'relative' }}>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deletePage(page.id);
-                      }}
-                      style={{
-                        padding: '4px',
-                        backgroundColor: '#2d1b1b',
-                        color: '#ff6b6b',
-                        border: '1px solid #4a2626',
-                        borderRadius: '50%',
-                        cursor: 'pointer',
-                        width: '24px',
-                        height: '24px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        transition: 'all 0.2s ease',
-                      }}
-                      onMouseOver={(e) => {
-                        e.currentTarget.style.backgroundColor = '#3d2b2b';
-                        e.currentTarget.style.transform = 'scale(1.1)';
-                      }}
-                      onMouseOut={(e) => {
-                        e.currentTarget.style.backgroundColor = '#2d1b1b';
-                        e.currentTarget.style.transform = 'scale(1)';
-                      }}
-                      title="Remove from active pages"
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                )}
-              </div>
-            ))
-        )}
-      </div>
-
-      {error && (
-        <div style={{
-          marginTop: '10px',
-          padding: '8px',
-          backgroundColor: '#2d1b1b',
-          border: '1px solid #4a2626',
-          borderRadius: '8px',
-          color: '#ff6b6b',
-          fontSize: '12px'
-        }}>
-          {error}
-        </div>
-      )}
-
-      {/* Dashboard Link */}
-      <div style={{
-        marginTop: '20px',
-        padding: '12px 0',
-        borderTop: '1px solid #2a2a2a',
-        textAlign: 'center'
-      }}>
-        <a
-          href="https://fona.meet-jain.in/dashboard"
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{
-            color: '#4a90e2',
-            textDecoration: 'none',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '8px',
-            fontSize: '14px',
-            padding: '6px 12px',
-            borderRadius: '4px',
-            transition: 'background-color 0.2s',
-          }}
-          onMouseOver={(e) => {
-            e.currentTarget.style.backgroundColor = '#2a2a2a';
-          }}
-          onMouseOut={(e) => {
-            e.currentTarget.style.backgroundColor = 'transparent';
-          }}
-        >
-          <User size={16} />
-          Dashboard
-        </a>
-      </div>
+      <DashboardLink onManageDisabledSites={() => setShowDisabledSites(true)} />
+      <Footer />
     </div>
   );
 };
